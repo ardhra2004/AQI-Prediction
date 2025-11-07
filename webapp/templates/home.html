@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>AQI Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    body.light { background:#f7fbff; color:#0d1b2a; }
+    body.dark { background:#0b1020; color:#e6f0ff; }
+    .card { border-radius:12px; }
+    .gauge { height:18px; border-radius:10px; transition:width 0.5s ease-in-out; }
+    .fi-list { max-height:240px; overflow:auto; }
+    #map { height:350px; }
+    .tab-pane { padding-top:1rem; }
+    table.table td, table.table th { text-align:center; font-size:0.85rem; }
+  </style>
+</head>
+<body class="light">
+<div class="container py-4">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h3>🌍 AQI Dashboard</h3>
+    <button id="themeToggle" class="btn btn-outline-secondary btn-sm">Toggle Theme</button>
+  </div>
+
+  <div class="row g-3">
+    <!-- === Left Panel: Prediction === -->
+    <div class="col-lg-4">
+      <div class="card p-3">
+        <h5>Predict AQI</h5>
+        <form method="post" id="predictForm">
+          {% csrf_token %}
+          <div class="row">
+            {% for fname in features %}
+            <div class="col-md-6 mb-2">
+              <label class="form-label small">{{ fname|upper }}</label>
+              <input name="{{ fname }}" step="any" class="form-control form-control-sm" placeholder="value">
+            </div>
+            {% endfor %}
+          </div>
+          <div class="mt-3 text-center">
+            <button type="submit" class="btn btn-primary btn-block">Predict</button>
+          </div>
+        </form>
+
+        {% if predicted_aqi %}
+        <div class="mt-3">
+          <div class="d-flex justify-content-between align-items-center">
+            <div>
+              <h5 class="mb-0">Predicted AQI</h5>
+              <h2 style="color: {{ predicted_color }}">{{ predicted_aqi }}</h2>
+              <p class="mb-0">
+                Category:
+                <strong style="color: {{ predicted_color }}">{{ predicted_bucket }}</strong>
+              </p>
+            </div>
+            <div style="width:40%">
+              <div class="bg-light rounded p-2">
+                <div class="gauge" style="background: linear-gradient(90deg, {{ predicted_color }} {{ predicted_percentage }}%, #e9ecef 0%);"></div>
+                <small class="text-muted">AQI (0–500)</small>
+              </div>
+            </div>
+          </div>
+        </div>
+        {% endif %}
+
+        {% if error %}
+        <div class="alert alert-danger mt-3">{{ error }}</div>
+        {% endif %}
+      </div>
+
+      <div class="card p-3 mt-3">
+        <h6>Category Advice</h6>
+        <ul class="list-unstyled small mb-0">
+          <li><strong>Good        —</strong>  Minimal health impact</li>
+          <li><strong>Satisfactory—</strong>  Minor effects for sensitive groups</li>
+          <li><strong>Moderate    —</strong>  Some health effects, caution suggested</li>
+          <li><strong>Poor        —</strong>  Reduce outdoor activity</li>
+          <li><strong>Very Poor   —</strong>  Avoid outdoor activities</li>
+          <li><strong>Severe      —</strong> — Stay indoors</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- === Right Panel: Analytics Tabs === -->
+    <div class="col-lg-8">
+      <div class="card p-3">
+        <ul class="nav nav-tabs" id="mainTabs" role="tablist">
+          <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#analytics">Analytics</button></li>
+          <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#importance">Explainability</button></li>
+          <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#maptab">Map</button></li>
+        </ul>
+
+        <div class="tab-content">
+          <!-- === Analytics Tab === -->
+          <div class="tab-pane active" id="analytics">
+            <div class="row mt-3">
+              <div class="col-md-12">
+                <h6>🌐 Global AQI Trend</h6>
+                <canvas id="globalTrend" height="120"></canvas>
+              </div>
+              <div class="col-md-6 mt-3">
+                <h6>🧪 Median Pollutants</h6>
+                <canvas id="pollutantBars" height="220"></canvas>
+                <div id="medianList" class="small mt-2 text-muted"></div>
+              </div>
+              <div class="col-md-6 mt-3">
+                <h6>📈 Correlation (Features vs AQI)</h6>
+                <div id="corrTable" class="small"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- === Explainability Tab === -->
+        <div class="tab-pane" id="importance">
+        <div class="row mt-3">
+            <div class="col-md-12">
+            <h6>🔍 Feature Importances</h6>
+            <div class="table-responsive">
+                <table id="fiTable" class="table table-bordered table-striped">
+                <thead class="table-light">
+                    <tr>
+                    <th>Feature</th>
+                    <th>Importance</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+                </table>
+            </div>
+            </div>
+        </div>
+        </div>
+
+        <script>
+        document.addEventListener('DOMContentLoaded', function () {
+        const fiData = document.getElementById('fi-data');
+        if (!fiData) return;
+
+        try {
+            const data = JSON.parse(fiData.textContent || fiData.innerText);
+            const tbody = document.querySelector('#fiTable tbody');
+            if (!data || !data.labels || !data.values || data.labels.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="2" class="text-muted">No feature importances available.</td></tr>';
+            return;
+            }
+
+            tbody.innerHTML = data.labels
+            .map((label, i) => `
+                <tr>
+                <td>${label.toUpperCase()}</td>
+                <td>${data.values[i].toFixed(3)}</td>
+                </tr>
+            `)
+            .join('');
+        } catch (err) {
+            console.error('Error rendering feature importance table:', err);
+        }
+        });
+        </script>
+
+
+
+          <!-- === Map Tab === -->
+          <div class="tab-pane" id="maptab">
+            <div class="mt-3">
+              <h6>🗺️ City-wise AQI Records</h6>
+              <div id="map"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- === JSON Context Injection === -->
+<script id="trends-data" type="application/json">{{ trends_json|safe }}</script>
+<script id="corr-data" type="application/json">{{ corr_json|safe }}</script>
+<script id="fi-data" type="application/json">{{ fi_json|safe }}</script>
+<script id="markers-data" type="application/json">{{ markers_json|safe }}</script>
+
+<!-- === JS Libraries === -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.2.1/dist/chart.umd.min.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+function safeParse(id, fallback = {}) {
+  try { return JSON.parse(document.getElementById(id)?.textContent || JSON.stringify(fallback)); }
+  catch { return fallback; }
+}
+
+const trends = safeParse('trends-data', { global_dates: [], global_aqi: [], pollutant_medians: {} });
+const corr = safeParse('corr-data', {});
+const fi = safeParse('fi-data', {});
+const markers = safeParse('markers-data', []);
+
+/* === Global AQI Trend === */
+if (trends.global_dates?.length && trends.global_aqi?.length) {
+  new Chart(document.getElementById('globalTrend'), {
+    type: 'line',
+    data: {
+      labels: trends.global_dates,
+      datasets: [{
+        label: 'Median AQI',
+        data: trends.global_aqi,
+        borderColor: '#007bff',
+        borderWidth: 2,
+        fill: true,
+        backgroundColor: 'rgba(0,123,255,0.1)',
+        tension: 0.3
+      }]
+    },
+    options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+  });
+}
+
+/* === Median Pollutant Chart === */
+const med = trends.pollutant_medians || {};
+const medianList = document.getElementById('medianList');
+if (Object.keys(med).length) {
+  const labels = Object.keys(med);
+  const values = Object.values(med);
+  new Chart(document.getElementById('pollutantBars'), {
+    type: 'bar',
+    data: { labels, datasets: [{ data: values, backgroundColor: '#28a745' }] },
+    options: { indexAxis: 'y', plugins: { legend: { display: false } } }
+  });
+  medianList.innerHTML = labels.map((l, i) => `${l.toUpperCase()}: ${values[i].toFixed(2)}`).join(' | ');
+} else {
+  medianList.innerHTML = '<small class="text-muted">No median pollutant data available.</small>';
+}
+
+/* === Correlation Table === */
+function renderCorrTable(obj) {
+  const c = document.getElementById('corrTable');
+  if (!obj || Object.keys(obj).length === 0) {
+    c.innerHTML = '<small class="text-muted">No correlation data available.</small>';
+    return;
+  }
+
+  // Detect and extract from map if exists
+  const corrMap = obj.map || obj.AQI || obj.corr_map || {};
+
+  if (!corrMap || Object.keys(corrMap).length === 0) {
+    c.innerHTML = '<small class="text-muted">No valid correlation entries found.</small>';
+    return;
+  }
+
+  // Build table
+  let html = `
+    <table class="table table-sm table-bordered">
+      <thead><tr><th>Feature</th><th>r(AQI)</th></tr></thead>
+      <tbody>
+  `;
+
+  Object.entries(corrMap).forEach(([k, v]) => {
+    if (typeof v === 'number') {
+      html += `<tr><td>${k.toUpperCase()}</td><td>${v.toFixed(3)}</td></tr>`;
+    }
+  });
+
+  html += '</tbody></table>';
+  c.innerHTML = html;
+}
+renderCorrTable(corr);
+
+
+/* === Feature Importances === */
+const fiList = document.getElementById('fiList');
+const fiData = fi?.map || fi?.values ? fi : {};
+
+if (!fiData || Object.keys(fiData.map || {}).length === 0) {
+  fiList.innerHTML = '<li class="list-group-item text-muted">No feature importances available</li>';
+} else {
+  const fiMap = fiData.map || {};
+  Object.entries(fiMap).forEach(([k, v]) => {
+    fiList.innerHTML += `
+      <li class="list-group-item d-flex justify-content-between align-items-center">
+        <span>${k.toUpperCase()}</span>
+        <span class="badge bg-primary rounded-pill">${v.toFixed(3)}</span>
+      </li>`;
+  });
+}
+
+
+/* === Map === */
+const map = L.map('map').setView([22.0, 78.0], 5);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18 }).addTo(map);
+if (markers.length) {
+  markers.forEach(m => {
+    const circle = L.circle([m.lat, m.lon], {
+      radius: Math.max(20000, m.count * 2000),
+      color: '#FF5733',
+      fillOpacity: 0.25
+    }).addTo(map);
+    circle.bindPopup(`<b>${m.city}</b><br/>Records: ${m.count}`);
+  });
+}
+
+
+/* === Theme Toggle === */
+document.getElementById('themeToggle').addEventListener('click', () => {
+  document.body.classList.toggle('dark');
+  document.body.classList.toggle('light');
+});
+
+
+</script>
+</body>
+</html>
