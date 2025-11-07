@@ -1,3 +1,19 @@
+# Ignore environment and data files
+.env
+*.csv
+*.xlsx
+*.pkl
+*.db
+*.sqlite3
+
+# Ignore model outputs and cache
+models/
+*.h5
+*.joblib
+
+# Ignore VS Code settings
+.vscode/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
